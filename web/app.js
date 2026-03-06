@@ -19,6 +19,8 @@
     connectBtn: document.getElementById("connectBtn"),
     connBadge: document.getElementById("connBadge"),
     connMeta: document.getElementById("connMeta"),
+    mobilePanelToggle: document.getElementById("mobilePanelToggle"),
+    trainControls: document.getElementById("trainControls"),
     runtimeHud: document.getElementById("runtimeHud"),
     diagram: document.getElementById("diagram"),
     routeSelect: document.getElementById("routeSelect"),
@@ -38,6 +40,7 @@
     manualDisconnect: false,
     reconnectAttempts: 0,
     reconnectTimer: null,
+    mobileControlsOpen: false,
 
     layout: null,
     layoutSectionIds: new Set(),
@@ -124,6 +127,10 @@
     if (refs.autoStopBtn) {
       refs.autoStopBtn.addEventListener("click", onAutoStop);
     }
+    if (refs.mobilePanelToggle) {
+      refs.mobilePanelToggle.addEventListener("click", onMobilePanelToggle);
+    }
+    window.addEventListener("resize", syncMobileControlsUi);
     if (refs.diagram) {
       refs.diagram.addEventListener("pointermove", onPointerMove);
       refs.diagram.addEventListener("pointerup", onPointerUp);
@@ -131,7 +138,34 @@
     }
 
     setConnectionBadge("offline", "offline", "-");
+    syncMobileControlsUi();
     connectSocket();
+  }
+
+  function isMobileViewport() {
+    return window.matchMedia("(max-width: 768px)").matches;
+  }
+
+  function syncMobileControlsUi() {
+    const isMobile = isMobileViewport();
+    if (!isMobile) {
+      state.mobileControlsOpen = false;
+    }
+    const open = isMobile && state.mobileControlsOpen;
+    document.body.classList.toggle("mobile-layout", isMobile);
+    document.body.classList.toggle("mobile-controls-open", open);
+    if (refs.mobilePanelToggle) {
+      refs.mobilePanelToggle.setAttribute("aria-expanded", open ? "true" : "false");
+      refs.mobilePanelToggle.textContent = open ? "Hide Controls" : "Controls";
+    }
+  }
+
+  function onMobilePanelToggle() {
+    if (!isMobileViewport()) {
+      return;
+    }
+    state.mobileControlsOpen = !state.mobileControlsOpen;
+    syncMobileControlsUi();
   }
 
   function onConnectClick() {
