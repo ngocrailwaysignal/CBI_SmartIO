@@ -399,6 +399,10 @@ def create_app(layout_path: Path, web_root: Path) -> web.Application:
     async def ws_handler(request: web.Request) -> web.StreamResponse:
         return await simulator.handle_ws(request)
 
+    async def index_handler(request: web.Request) -> web.StreamResponse:
+        return web.FileResponse(web_root / "index.html")
+
+    app.router.add_get("/", index_handler)
     app.router.add_get("/smartio", ws_handler)
     app.router.add_static("/", path=str(web_root), show_index=False)
     return app
