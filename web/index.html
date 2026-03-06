@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CBI Runtime Web HMI</title>
+    <link rel="stylesheet" href="./styles.css?v=20260306-cbi-canvas-fix2" />
+  </head>
+  <body>
+    <div class="canvas-shell">
+      <section class="canvas-panel">
+        <svg id="diagram" viewBox="-700 -650 1900 700" preserveAspectRatio="xMidYMid meet"></svg>
+        <div class="overlay-top">
+          <div class="brand">
+            <h1>CBI SMART IO Layout</h1>
+          </div>
+          <div class="conn-row">
+            <label for="wsUrl">WebSocket</label>
+            <input id="wsUrl" value="ws://127.0.0.1:8765/smartio" />
+            <button id="connectBtn">Connect</button>
+            <span id="connBadge" class="badge offline">offline</span>
+            <span id="connMeta" class="meta">-</span>
+          </div>
+        </div>
+        <div class="overlay-bottom">
+          <span id="runtimeHud" class="meta">CBI Clients: 0 | Web Clients: 0 | Routes: 0 | Trains: 0 | OCC: 0</span>
+        </div>
+        <aside class="train-controls">
+          <label class="field-label" for="routeSelect">Active Route</label>
+          <select id="routeSelect"></select>
+          <p id="activeRoute" class="hint">Selected Route: -</p>
+          <div class="row">
+            <button id="addTrainBtn">Add Train</button>
+            <button id="clearTrainBtn">Clear Train</button>
+          </div>
+          <div class="row">
+            <button id="autoStartBtn">Auto Start</button>
+            <button id="autoStopBtn">Auto Stop</button>
+          </div>
+        </aside>
+        <div id="toast" class="toast hidden"></div>
+      </section>
+    </div>
+    <script src="./app.js?v=20260306-cbi-canvas-fix2"></script>
+  </body>
+</html>
