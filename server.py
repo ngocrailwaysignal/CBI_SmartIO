@@ -1,38 +1,23 @@
 """Smart IO Web Simulator as a SmartIO pass-through bridge.
 
 Run:
-    python tools/smartio_web_simulator/server.py
+    python server.py
 
-Default endpoints:
-    WebSocket: ws://127.0.0.1:8765/smartio
-    Web UI:    http://127.0.0.1:8088/
+Default endpoint:
+    HTTP + WebSocket: http://0.0.0.0:8088/ (WebSocket path: /smartio)
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
-import threading
 import time
-from functools import partial
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from PyQt6.QtCore import QCoreApplication, QObject
-from PyQt6.QtNetwork import QHostAddress
-from PyQt6.QtWebSockets import QWebSocket, QWebSocketServer
-
-
-class NoCacheStaticHandler(SimpleHTTPRequestHandler):
-    """Serve static files with no-store headers to avoid stale web assets."""
-
-    def end_headers(self) -> None:
-        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
-        self.send_header("Pragma", "no-cache")
-        self.send_header("Expires", "0")
-        super().end_headers()
+from aiohttp import WSMsgType, web
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -57,11 +42,10 @@ def _normalize_node_list(raw_value: Any) -> list[str]:
     return [str(item).strip() for item in raw_value if str(item).strip()]
 
 
-class SmartIOWebSimulator(QObject):
+class SmartIOWebSimulator:
     """Bridge between CBI and web clients without interlocking execution."""
 
-    def __init__(self, *, layout_path: Path, ws_port: int) -> None:
-        super().__init__()
+    def __init__(self, *, layout_path: Path) -> None:
         self.layout_path = layout_path
         self.layout_payload = _read_json(layout_path)
         self.latest_runtime_snapshot: dict[str, Any] = {
@@ -73,88 +57,86 @@ class SmartIOWebSimulator(QObject):
         }
         self.selected_route_id: str | None = None
 
-        self.server = QWebSocketServer(
-            "SmartIOSimulator",
-            QWebSocketServer.SslMode.NonSecureMode,
-            self,
-        )
-        if not self.server.listen(QHostAddress.SpecialAddress.Any, int(ws_port)):
-            raise RuntimeError(f"Cannot start WebSocket server on port {ws_port}")
-        self.server.newConnection.connect(self._on_new_connection)
+        self._clients: set[web.WebSocketResponse] = set()
+        self._web_clients: set[web.WebSocketResponse] = set()
+        self._cbi_clients: set[web.WebSocketResponse] = set()
 
-        self._clients: set[QWebSocket] = set()
-        self._web_clients: set[QWebSocket] = set()
-        self._cbi_clients: set[QWebSocket] = set()
-        print(f"[SmartIO] WebSocket listening on ws://127.0.0.1:{ws_port}/smartio")
+    async def handle_ws(self, request: web.Request) -> web.WebSocketResponse:
+        socket = web.WebSocketResponse(heartbeat=30)
+        await socket.prepare(request)
 
-    def _on_new_connection(self) -> None:
-        socket = self.server.nextPendingConnection()
-        if socket is None:
-            return
         self._clients.add(socket)
-        socket.textMessageReceived.connect(partial(self._on_text_message, socket))
-        socket.disconnected.connect(partial(self._on_disconnected, socket))
-        self._send_snapshot(socket)
+        await self._send_snapshot(socket)
 
-    def _on_disconnected(self, socket: QWebSocket) -> None:
+        try:
+            async for msg in socket:
+                if msg.type != WSMsgType.TEXT:
+                    continue
+                await self._on_text_message(socket, msg.data)
+        finally:
+            self._on_disconnected(socket)
+
+        return socket
+
+    def _on_disconnected(self, socket: web.WebSocketResponse) -> None:
         self._clients.discard(socket)
         self._web_clients.discard(socket)
         self._cbi_clients.discard(socket)
 
-    def _on_text_message(self, socket: QWebSocket, raw_message: str) -> None:
+    async def _on_text_message(self, socket: web.WebSocketResponse, raw_message: str) -> None:
         try:
             envelope = json.loads(raw_message)
         except json.JSONDecodeError:
-            self._send_error(socket, "INVALID_JSON", "Message must be valid JSON")
+            await self._send_error(socket, "INVALID_JSON", "Message must be valid JSON")
             return
         if not isinstance(envelope, dict):
-            self._send_error(socket, "INVALID_ENVELOPE", "Message must be object")
+            await self._send_error(socket, "INVALID_ENVELOPE", "Message must be object")
             return
         message_type = str(envelope.get("type", "")).strip()
         payload = envelope.get("payload", {})
         if not isinstance(payload, dict):
-            self._send_error(socket, "INVALID_PAYLOAD", "payload must be object")
+            await self._send_error(socket, "INVALID_PAYLOAD", "payload must be object")
             return
 
         if message_type == "hello":
-            self._handle_hello(socket, payload)
+            await self._handle_hello(socket, payload)
             return
 
         if message_type == "command":
             self._cbi_clients.add(socket)
-            self._broadcast_web(
+            await self._broadcast_web(
                 {
                     "type": "cbi_command",
                     "payload": payload,
                     "ts": envelope.get("ts", _now_ts()),
                 }
             )
-            self._broadcast_snapshot()
+            await self._broadcast_snapshot()
             return
 
         if message_type == "runtime_snapshot":
             self._cbi_clients.add(socket)
             if not self._validate_runtime_snapshot(payload):
-                self._send_error(socket, "INVALID_PAYLOAD", "runtime_snapshot payload is invalid")
+                await self._send_error(socket, "INVALID_PAYLOAD", "runtime_snapshot payload is invalid")
                 return
             runtime_layout = payload.get("layout")
             if isinstance(runtime_layout, dict):
                 self.layout_payload = dict(runtime_layout)
             self.latest_runtime_snapshot = dict(payload)
             self._normalize_selected_route()
-            self._broadcast_web(
+            await self._broadcast_web(
                 {
                     "type": "runtime_snapshot",
                     "payload": payload,
                     "ts": envelope.get("ts", _now_ts()),
                 }
             )
-            self._broadcast_snapshot()
+            await self._broadcast_snapshot()
             return
 
         if message_type == "state_update":
             self._web_clients.add(socket)
-            self._forward_to_cbi(
+            await self._forward_to_cbi(
                 {
                     "type": "state_update",
                     "payload": payload,
@@ -165,27 +147,27 @@ class SmartIOWebSimulator(QObject):
 
         if message_type == "web_control":
             self._web_clients.add(socket)
-            self._apply_web_control(socket, payload)
+            await self._apply_web_control(socket, payload)
             return
 
-        self._send_error(socket, "UNSUPPORTED_TYPE", f"Unsupported type {message_type}")
+        await self._send_error(socket, "UNSUPPORTED_TYPE", f"Unsupported type {message_type}")
 
-    def _handle_hello(self, socket: QWebSocket, payload: dict[str, Any]) -> None:
+    async def _handle_hello(self, socket: web.WebSocketResponse, payload: dict[str, Any]) -> None:
         role = str(payload.get("role", "")).strip().lower()
         if role == "web":
             self._web_clients.add(socket)
         elif role == "cbi":
             self._cbi_clients.add(socket)
-        self._send_snapshot(socket)
+        await self._send_snapshot(socket)
 
-    def _apply_web_control(self, socket: QWebSocket, payload: dict[str, Any]) -> None:
+    async def _apply_web_control(self, socket: web.WebSocketResponse, payload: dict[str, Any]) -> None:
         action = str(payload.get("action", "")).strip()
         if action in {"set_active_route", "set_selected_route"}:
             route_id = str(payload.get("route_id", "")).strip()
             self.selected_route_id = route_id or None
-            self._broadcast_snapshot()
+            await self._broadcast_snapshot()
             return
-        self._send_error(socket, "UNKNOWN_WEB_CONTROL", f"Unsupported action {action}")
+        await self._send_error(socket, "UNKNOWN_WEB_CONTROL", f"Unsupported action {action}")
 
     def _runtime_payload(self) -> dict[str, Any]:
         snapshot = self.latest_runtime_snapshot if isinstance(self.latest_runtime_snapshot, dict) else {}
@@ -264,7 +246,6 @@ class SmartIOWebSimulator(QObject):
                 }
             )
 
-        self._normalize_selected_route()
         return {
             "tick": int(snapshot.get("tick", 0) or 0),
             "sections": sections,
@@ -276,71 +257,77 @@ class SmartIOWebSimulator(QObject):
         }
 
     def _runtime_snapshot_payload(self) -> dict[str, Any]:
-        return dict(self.latest_runtime_snapshot)
+        snapshot = self.latest_runtime_snapshot if isinstance(self.latest_runtime_snapshot, dict) else {}
+        return {
+            "tick": int(snapshot.get("tick", 0) or 0),
+            "routes": snapshot.get("routes", []) if isinstance(snapshot.get("routes"), list) else [],
+            "trains": snapshot.get("trains", []) if isinstance(snapshot.get("trains"), list) else [],
+            "occupancy": snapshot.get("occupancy", []) if isinstance(snapshot.get("occupancy"), list) else [],
+            "signal_state": snapshot.get("signal_state", []) if isinstance(snapshot.get("signal_state"), list) else [],
+        }
+
+    def _validate_runtime_snapshot(self, payload: dict[str, Any]) -> bool:
+        expected = ("tick", "routes", "trains", "occupancy", "signal_state")
+        for key in expected:
+            if key not in payload:
+                return False
+        return all(isinstance(payload.get(k), list) for k in ("routes", "trains", "occupancy", "signal_state"))
 
     def _normalize_selected_route(self) -> None:
-        route_states = self.latest_runtime_snapshot.get("routes", [])
-        active_route_ids: list[str] = []
-        for route_state in route_states:
-            if not isinstance(route_state, dict):
-                continue
-            route_id = str(route_state.get("id", route_state.get("route_id", ""))).strip()
-            if route_id:
-                active_route_ids.append(route_id)
-        active_route_ids = sorted(set(active_route_ids))
-        if self.selected_route_id in active_route_ids:
+        selected = str(self.selected_route_id or "").strip()
+        if not selected:
+            self.selected_route_id = None
             return
-        self.selected_route_id = active_route_ids[0] if active_route_ids else None
+        if selected in self._active_route_path_map():
+            self.selected_route_id = selected
+            return
+        self.selected_route_id = None
 
     def _active_route_path_map(self) -> dict[str, list[str]]:
-        route_paths: dict[str, list[str]] = {}
-        for route_state in self.latest_runtime_snapshot.get("routes", []):
+        snapshot = self.latest_runtime_snapshot if isinstance(self.latest_runtime_snapshot, dict) else {}
+        path_map: dict[str, list[str]] = {}
+        for route_state in snapshot.get("routes", []):
             if not isinstance(route_state, dict):
                 continue
             route_id = str(route_state.get("id", route_state.get("route_id", ""))).strip()
             if not route_id:
                 continue
-            route_paths[route_id] = [
-                *_normalize_node_list(route_state.get("path")),
-                *_normalize_node_list(route_state.get("overlap_path")),
-            ]
-        return route_paths
+            if str(route_state.get("status", "")).strip().upper() != "ACTIVE":
+                continue
+            full_path = _normalize_node_list(route_state.get("full_path", []))
+            if full_path:
+                path_map[route_id] = full_path
+        return path_map
 
-    @staticmethod
-    def _validate_runtime_snapshot(payload: dict[str, Any]) -> bool:
-        required_list_fields = ("routes", "trains", "occupancy", "signal_state")
-        return all(isinstance(payload.get(field), list) for field in required_list_fields)
-
-    def _send_error(self, socket: QWebSocket, code: str, message: str) -> None:
+    async def _send_error(self, socket: web.WebSocketResponse, code: str, message: str) -> None:
         envelope = {
             "type": "error",
             "payload": {"code": code, "message": message},
             "ts": _now_ts(),
         }
-        self._send(socket, envelope)
+        await self._send(socket, envelope)
 
-    def _send(self, socket: QWebSocket, envelope: dict[str, Any]) -> None:
+    async def _send(self, socket: web.WebSocketResponse, envelope: dict[str, Any]) -> None:
+        if socket.closed:
+            return
         try:
-            socket.sendTextMessage(json.dumps(envelope, ensure_ascii=False))
+            await socket.send_str(json.dumps(envelope, ensure_ascii=False))
         except Exception:
             return
 
-    def _broadcast_web(self, envelope: dict[str, Any]) -> None:
+    async def _broadcast_web(self, envelope: dict[str, Any]) -> None:
         targets = self._web_clients if self._web_clients else self._clients
-        for socket in list(targets):
-            self._send(socket, envelope)
+        await asyncio.gather(*(self._send(socket, envelope) for socket in list(targets)), return_exceptions=True)
 
-    def _forward_to_cbi(self, envelope: dict[str, Any]) -> None:
-        for socket in list(self._cbi_clients):
-            self._send(socket, envelope)
+    async def _forward_to_cbi(self, envelope: dict[str, Any]) -> None:
+        await asyncio.gather(*(self._send(socket, envelope) for socket in list(self._cbi_clients)), return_exceptions=True)
 
-    def _broadcast_snapshot(self) -> None:
+    async def _broadcast_snapshot(self) -> None:
         envelope = self._snapshot_envelope()
-        for socket in list(self._clients):
-            self._send(socket, envelope)
+        await asyncio.gather(*(self._send(socket, envelope) for socket in list(self._clients)), return_exceptions=True)
 
-    def _send_snapshot(self, socket: QWebSocket) -> None:
-        self._send(socket, self._snapshot_envelope())
+    async def _send_snapshot(self, socket: web.WebSocketResponse) -> None:
+        await self._send(socket, self._snapshot_envelope())
 
     def _snapshot_envelope(self) -> dict[str, Any]:
         runtime_payload = self._runtime_payload()
@@ -384,15 +371,6 @@ class SmartIOWebSimulator(QObject):
         return {"type": "sim_snapshot", "payload": payload, "ts": _now_ts()}
 
 
-def start_http_server(*, web_root: Path, http_port: int) -> ThreadingHTTPServer:
-    handler = partial(NoCacheStaticHandler, directory=os.fspath(web_root))
-    server = ThreadingHTTPServer(("127.0.0.1", int(http_port)), handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    print(f"[SmartIO] Web UI: http://127.0.0.1:{http_port}/")
-    return server
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Smart IO Web Simulator")
     parser.add_argument(
@@ -401,18 +379,29 @@ def parse_args() -> argparse.Namespace:
         help="Path to layout JSON used by simulator",
     )
     parser.add_argument(
-        "--ws-port",
-        type=int,
-        default=8765,
-        help="WebSocket port for CBI and web clients",
+        "--host",
+        default=os.environ.get("HOST", "0.0.0.0"),
+        help="Host/IP for binding HTTP + WebSocket",
     )
     parser.add_argument(
-        "--http-port",
+        "--port",
         type=int,
-        default=8088,
-        help="HTTP port for simulator web UI",
+        default=int(os.environ.get("PORT", "8088")),
+        help="Port for HTTP + WebSocket",
     )
     return parser.parse_args()
+
+
+def create_app(layout_path: Path, web_root: Path) -> web.Application:
+    simulator = SmartIOWebSimulator(layout_path=layout_path)
+    app = web.Application()
+
+    async def ws_handler(request: web.Request) -> web.StreamResponse:
+        return await simulator.handle_ws(request)
+
+    app.router.add_get("/smartio", ws_handler)
+    app.router.add_static("/", path=str(web_root), show_index=False)
+    return app
 
 
 def main() -> int:
@@ -424,13 +413,12 @@ def main() -> int:
     if not web_root.exists():
         raise FileNotFoundError(f"Web root not found: {web_root}")
 
-    http_server = start_http_server(web_root=web_root, http_port=args.http_port)
-    app = QCoreApplication([])
-    _simulator = SmartIOWebSimulator(layout_path=layout_path, ws_port=args.ws_port)
-    try:
-        return app.exec()
-    finally:
-        http_server.shutdown()
+    print(f"[SmartIO] HTTP + WebSocket listening on http://{args.host}:{args.port}/")
+    print("[SmartIO] WebSocket path: /smartio")
+
+    app = create_app(layout_path=layout_path, web_root=web_root)
+    web.run_app(app, host=args.host, port=int(args.port), print=None)
+    return 0
 
 
 if __name__ == "__main__":
