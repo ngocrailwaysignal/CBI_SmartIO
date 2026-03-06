@@ -85,10 +85,19 @@
     trainNodes: new Map(),
   };
 
+  function defaultWebSocketUrl() {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return `${protocol}//${window.location.host}/smartio`;
+  }
+
   function boot() {
     if (refs.buildTag) {
       refs.buildTag.textContent = `build: ${WEB_BUILD}`;
     }
+    if (refs.wsUrl && !String(refs.wsUrl.value || "").trim()) {
+      refs.wsUrl.value = defaultWebSocketUrl();
+    }
+
     if (refs.connectBtn) {
       refs.connectBtn.addEventListener("click", onConnectClick);
     }
