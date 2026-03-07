@@ -136,6 +136,9 @@ class SmartIOWebSimulator:
 
         if message_type == "state_update":
             self._web_clients.add(socket)
+            msg_id = str(envelope.get("msg_id", "")).strip()
+            if msg_id:
+                await self._send_ack(socket, "state_update", msg_id, "received")
             await self._forward_to_cbi(
                 {
                     "type": "state_update",
@@ -303,6 +306,24 @@ class SmartIOWebSimulator:
         envelope = {
             "type": "error",
             "payload": {"code": code, "message": message},
+            "ts": _now_ts(),
+        }
+        await self._send(socket, envelope)
+
+    async def _send_ack(
+        self,
+        socket: web.WebSocketResponse,
+        for_type: str,
+        msg_id: str,
+        status: str = "received",
+    ) -> None:
+        envelope = {
+            "type": "ack",
+            "payload": {
+                "for_type": str(for_type).strip(),
+                "msg_id": str(msg_id).strip(),
+                "status": str(status).strip(),
+            },
             "ts": _now_ts(),
         }
         await self._send(socket, envelope)

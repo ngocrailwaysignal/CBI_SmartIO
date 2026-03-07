@@ -17,6 +17,8 @@
   const CAMERA_PAN_STEP = 0.2;
   const CAMERA_MIN_SCALE = 0.35;
   const CAMERA_MAX_SCALE = 1;
+  const STATE_UPDATE_ACK_BACKOFF_MS = [400, 800, 1600];
+  const STATE_UPDATE_ACK_MAX_RETRIES = 3;
 
   const refs = {
     wsUrl: document.getElementById("wsUrl"),
@@ -81,6 +83,8 @@
     localTrainSerial: 1,
     autoTimer: null,
     drag: null,
+    pendingStateUpdateAcks: new Map(),
+    stateUpdateMsgSerial: 1,
     camera: {
       x: CBI_VIEWBOX.x,
       y: CBI_VIEWBOX.y,
@@ -246,6 +250,7 @@
 
     ws.addEventListener("close", () => {
       state.connected = false;
+      clearPendingStateUpdateAcks();
       if (refs.connectBtn) {
         refs.connectBtn.textContent = "Connect";
       }
@@ -266,6 +271,7 @@
   function disconnectSocket(manual) {
     state.manualDisconnect = Boolean(manual);
     clearReconnectTimer();
+    clearPendingStateUpdateAcks();
     if (!state.ws) {
       state.connected = false;
       if (refs.connectBtn) {
@@ -314,7 +320,7 @@
     }
   }
 
-  function sendEnvelope(type, payload) {
+  function sendEnvelope(type, payload, extras) {
     if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
       return false;
     }
@@ -323,15 +329,119 @@
       payload: payload && typeof payload === "object" ? payload : {},
       ts: Date.now() / 1000,
     };
+    if (extras && typeof extras === "object") {
+      Object.assign(envelope, extras);
+    }
     state.ws.send(JSON.stringify(envelope));
     return true;
   }
 
   function sendStateUpdate(payload) {
-    const ok = sendEnvelope("state_update", payload);
+    const messagePayload = payload && typeof payload === "object" ? payload : {};
+    const msgId = nextStateUpdateMessageId();
+    const ok = sendEnvelope("state_update", messagePayload, { msg_id: msgId });
     if (!ok) {
       showToast("Cannot send state_update while WebSocket is offline.");
+      return;
     }
+    trackPendingStateUpdateAck(msgId, messagePayload);
+  }
+
+  function nextStateUpdateMessageId() {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") {
+      return window.crypto.randomUUID();
+    }
+    const now = Date.now();
+    const serial = state.stateUpdateMsgSerial++;
+    return `su-${now}-${serial}`;
+  }
+
+  function trackPendingStateUpdateAck(msgId, payload) {
+    if (!msgId) {
+      return;
+    }
+    const pending = {
+      msgId,
+      payload: payload && typeof payload === "object" ? payload : {},
+      retryCount: 0,
+      timer: null,
+    };
+    state.pendingStateUpdateAcks.set(msgId, pending);
+    scheduleStateUpdateAckTimeout(msgId);
+  }
+
+  function scheduleStateUpdateAckTimeout(msgId) {
+    const pending = state.pendingStateUpdateAcks.get(msgId);
+    if (!pending) {
+      return;
+    }
+    if (pending.timer !== null) {
+      window.clearTimeout(pending.timer);
+      pending.timer = null;
+    }
+    const delay = STATE_UPDATE_ACK_BACKOFF_MS[pending.retryCount] || STATE_UPDATE_ACK_BACKOFF_MS[STATE_UPDATE_ACK_BACKOFF_MS.length - 1];
+    pending.timer = window.setTimeout(() => {
+      onStateUpdateAckTimeout(msgId);
+    }, delay);
+  }
+
+  function onStateUpdateAckTimeout(msgId) {
+    const pending = state.pendingStateUpdateAcks.get(msgId);
+    if (!pending) {
+      return;
+    }
+    if (pending.retryCount >= STATE_UPDATE_ACK_MAX_RETRIES) {
+      if (pending.timer !== null) {
+        window.clearTimeout(pending.timer);
+      }
+      state.pendingStateUpdateAcks.delete(msgId);
+      showToast(`state_update ACK timeout (${msgId}).`);
+      return;
+    }
+    pending.retryCount += 1;
+    const resent = sendEnvelope("state_update", pending.payload, { msg_id: msgId });
+    if (!resent) {
+      if (pending.timer !== null) {
+        window.clearTimeout(pending.timer);
+      }
+      state.pendingStateUpdateAcks.delete(msgId);
+      showToast("Cannot retry state_update while WebSocket is offline.");
+      return;
+    }
+    scheduleStateUpdateAckTimeout(msgId);
+  }
+
+  function clearPendingStateUpdateAcks() {
+    for (const pending of state.pendingStateUpdateAcks.values()) {
+      if (pending && pending.timer !== null) {
+        window.clearTimeout(pending.timer);
+      }
+    }
+    state.pendingStateUpdateAcks.clear();
+  }
+
+  function onAckMessage(payload) {
+    if (!payload || typeof payload !== "object") {
+      return;
+    }
+    if (String(payload.for_type || "").trim() !== "state_update") {
+      return;
+    }
+    if (String(payload.status || "").trim() !== "received") {
+      return;
+    }
+    const msgId = String(payload.msg_id || "").trim();
+    if (!msgId) {
+      return;
+    }
+    const pending = state.pendingStateUpdateAcks.get(msgId);
+    if (!pending) {
+      return;
+    }
+    if (pending.timer !== null) {
+      window.clearTimeout(pending.timer);
+    }
+    state.pendingStateUpdateAcks.delete(msgId);
   }
 
   function localTrainsPayload() {
@@ -370,6 +480,10 @@
     if (type === "cbi_command") {
       applyCbiCommand(payload);
       renderAll();
+      return;
+    }
+    if (type === "ack") {
+      onAckMessage(payload);
       return;
     }
     if (type === "error") {
