@@ -411,6 +411,10 @@
   }
 
   function applyRuntimeSnapshot(snapshot) {
+    if (snapshot.layout && typeof snapshot.layout === "object") {
+      loadLayout(snapshot.layout);
+    }
+
     if (Number.isFinite(Number(snapshot.tick))) {
       state.tick = Math.max(0, Number(snapshot.tick));
     }
