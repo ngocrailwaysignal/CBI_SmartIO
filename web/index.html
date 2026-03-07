@@ -3,8 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>CBI Runtime Web HMI</title>
-    <link rel="stylesheet" href="./styles.css?v=20260306-mobile-ui-1" />
+    <title>CBI SMART IO Layout</title>
+    <link rel="stylesheet" href="./styles.css?v=20260307-camera-ui-1" />
   </head>
   <body>
     <div class="canvas-shell">
@@ -28,6 +28,17 @@
         <div class="overlay-bottom">
           <span id="runtimeHud" class="meta">CBI Clients: 0 | Web Clients: 0 | Routes: 0 | Trains: 0 | OCC: 0</span>
         </div>
+        <div class="camera-controls" aria-label="Camera controls">
+          <div class="camera-row">
+            <button id="zoomInBtn" type="button" title="Zoom In">+</button>
+            <button id="zoomOutBtn" type="button" title="Zoom Out">-</button>
+            <button id="zoomResetBtn" type="button" title="Reset View">Reset</button>
+          </div>
+          <div class="camera-row">
+            <button id="panLeftBtn" type="button" title="Pan Left">&larr;</button>
+            <button id="panRightBtn" type="button" title="Pan Right">&rarr;</button>
+          </div>
+        </div>
         <aside id="trainControls" class="train-controls">
           <label class="field-label" for="routeSelect">Active Route</label>
           <select id="routeSelect"></select>
@@ -44,6 +55,6 @@
         <div id="toast" class="toast hidden"></div>
       </section>
     </div>
-    <script src="./app.js?v=20260306-mobile-ui-1"></script>
+    <script src="./app.js?v=20260307-camera-ui-1"></script>
   </body>
 </html>

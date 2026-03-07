@@ -179,6 +179,32 @@ button:disabled {
   border: 1px solid var(--panel-border);
 }
 
+.camera-controls {
+  position: absolute;
+  right: 12px;
+  bottom: 56px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 8px;
+  border-radius: 10px;
+  background: rgba(8, 19, 30, 0.76);
+  border: 1px solid var(--panel-border);
+  backdrop-filter: blur(8px);
+  z-index: 5;
+}
+
+.camera-row {
+  display: flex;
+  gap: 6px;
+}
+
+.camera-controls button {
+  min-width: 40px;
+  min-height: 34px;
+  padding: 6px 10px;
+}
+
 .train-controls {
   position: absolute;
   top: 74px;
@@ -490,6 +516,20 @@ button:disabled {
     right: 6px;
     bottom: 6px;
     padding: 6px 8px;
+  }
+
+  .camera-controls {
+    right: 6px;
+    bottom: 54px;
+    padding: 6px;
+    gap: 5px;
+  }
+
+  .camera-controls button {
+    min-width: 36px;
+    min-height: 32px;
+    padding: 5px 8px;
+    font-size: 12px;
   }
 
   #runtimeHud {

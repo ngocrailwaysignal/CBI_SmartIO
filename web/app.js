@@ -13,6 +13,10 @@
     width: 1900,
     height: 700,
   });
+  const CAMERA_ZOOM_STEP = 0.15;
+  const CAMERA_PAN_STEP = 0.2;
+  const CAMERA_MIN_SCALE = 0.35;
+  const CAMERA_MAX_SCALE = 1;
 
   const refs = {
     wsUrl: document.getElementById("wsUrl"),
@@ -29,6 +33,11 @@
     clearTrainBtn: document.getElementById("clearTrainBtn"),
     autoStartBtn: document.getElementById("autoStartBtn"),
     autoStopBtn: document.getElementById("autoStopBtn"),
+    zoomInBtn: document.getElementById("zoomInBtn"),
+    zoomOutBtn: document.getElementById("zoomOutBtn"),
+    zoomResetBtn: document.getElementById("zoomResetBtn"),
+    panLeftBtn: document.getElementById("panLeftBtn"),
+    panRightBtn: document.getElementById("panRightBtn"),
     runtimeDigest: document.getElementById("runtimeDigest"),
     toast: document.getElementById("toast"),
     buildTag: document.getElementById("buildTag"),
@@ -72,6 +81,12 @@
     localTrainSerial: 1,
     autoTimer: null,
     drag: null,
+    camera: {
+      x: CBI_VIEWBOX.x,
+      y: CBI_VIEWBOX.y,
+      width: CBI_VIEWBOX.width,
+      height: CBI_VIEWBOX.height,
+    },
 
     layers: {
       edges: null,
@@ -126,6 +141,29 @@
     }
     if (refs.autoStopBtn) {
       refs.autoStopBtn.addEventListener("click", onAutoStop);
+    }
+    if (refs.zoomInBtn) {
+      refs.zoomInBtn.addEventListener("click", () => {
+        zoomCamera(1);
+      });
+    }
+    if (refs.zoomOutBtn) {
+      refs.zoomOutBtn.addEventListener("click", () => {
+        zoomCamera(-1);
+      });
+    }
+    if (refs.zoomResetBtn) {
+      refs.zoomResetBtn.addEventListener("click", resetCamera);
+    }
+    if (refs.panLeftBtn) {
+      refs.panLeftBtn.addEventListener("click", () => {
+        panCamera(-1);
+      });
+    }
+    if (refs.panRightBtn) {
+      refs.panRightBtn.addEventListener("click", () => {
+        panCamera(1);
+      });
     }
     if (refs.mobilePanelToggle) {
       refs.mobilePanelToggle.addEventListener("click", onMobilePanelToggle);
@@ -1221,10 +1259,75 @@
     if (!refs.diagram) {
       return;
     }
+    clampCameraState();
     refs.diagram.setAttribute(
       "viewBox",
-      `${CBI_VIEWBOX.x} ${CBI_VIEWBOX.y} ${CBI_VIEWBOX.width} ${CBI_VIEWBOX.height}`
+      `${state.camera.x} ${state.camera.y} ${state.camera.width} ${state.camera.height}`
     );
+    syncCameraUi();
+  }
+
+  function clampCameraState() {
+    const maxWidth = CBI_VIEWBOX.width * CAMERA_MAX_SCALE;
+    const minWidth = CBI_VIEWBOX.width * CAMERA_MIN_SCALE;
+    state.camera.width = clampNumber(state.camera.width, minWidth, maxWidth);
+    state.camera.height = (state.camera.width * CBI_VIEWBOX.height) / CBI_VIEWBOX.width;
+
+    const maxX = CBI_VIEWBOX.x + CBI_VIEWBOX.width - state.camera.width;
+    const maxY = CBI_VIEWBOX.y + CBI_VIEWBOX.height - state.camera.height;
+    state.camera.x = clampNumber(state.camera.x, CBI_VIEWBOX.x, maxX);
+    state.camera.y = clampNumber(state.camera.y, CBI_VIEWBOX.y, maxY);
+  }
+
+  function zoomCamera(direction) {
+    const zoomDirection = Number(direction);
+    if (!Number.isFinite(zoomDirection) || zoomDirection === 0) {
+      return;
+    }
+    const centerX = state.camera.x + state.camera.width / 2;
+    const centerY = state.camera.y + state.camera.height / 2;
+    const factor = zoomDirection > 0 ? 1 - CAMERA_ZOOM_STEP : 1 + CAMERA_ZOOM_STEP;
+    state.camera.width *= factor;
+    state.camera.height *= factor;
+    state.camera.x = centerX - state.camera.width / 2;
+    state.camera.y = centerY - state.camera.height / 2;
+    applyViewBox();
+  }
+
+  function panCamera(direction) {
+    const panDirection = Number(direction);
+    if (!Number.isFinite(panDirection) || panDirection === 0) {
+      return;
+    }
+    state.camera.x += state.camera.width * CAMERA_PAN_STEP * panDirection;
+    applyViewBox();
+  }
+
+  function resetCamera() {
+    state.camera.x = CBI_VIEWBOX.x;
+    state.camera.y = CBI_VIEWBOX.y;
+    state.camera.width = CBI_VIEWBOX.width;
+    state.camera.height = CBI_VIEWBOX.height;
+    applyViewBox();
+  }
+
+  function syncCameraUi() {
+    const minWidth = CBI_VIEWBOX.width * CAMERA_MIN_SCALE;
+    const maxWidth = CBI_VIEWBOX.width * CAMERA_MAX_SCALE;
+    if (refs.zoomInBtn) {
+      refs.zoomInBtn.disabled = state.camera.width <= minWidth + 0.5;
+    }
+    if (refs.zoomOutBtn) {
+      refs.zoomOutBtn.disabled = state.camera.width >= maxWidth - 0.5;
+    }
+  }
+
+  function clampNumber(value, minValue, maxValue) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      return minValue;
+    }
+    return Math.max(minValue, Math.min(maxValue, numeric));
   }
 
   function onRouteSelected() {
@@ -1304,6 +1407,7 @@
       // Auto-run should stop at route body and not enter overlap.
       sectionPath: [...autoPath],
       index: 0,
+      lastSection: null,
       currentSection: startSection,
     });
     updateSectionOccupancyForMove(null, startSection, trainId);
@@ -1391,8 +1495,47 @@
     }
     const oldSection = train.currentSection;
     train.index += 1;
+    train.lastSection = oldSection || null;
     train.currentSection = targetSection;
     updateSectionOccupancyForMove(oldSection, targetSection, trainId);
+    renderAll();
+    return true;
+  }
+
+  function moveTrainToAnySection(trainId, targetSection) {
+    const train = state.localTrains.get(trainId);
+    if (!train) {
+      return false;
+    }
+    const sectionToken = String(targetSection || "").trim();
+    if (!sectionToken || !state.layoutSectionIds.has(sectionToken)) {
+      showToast("Invalid target section.");
+      renderAll();
+      return false;
+    }
+    if (!canOccupySection(sectionToken, trainId)) {
+      showToast(`Section ${sectionToken} is occupied.`);
+      renderAll();
+      return false;
+    }
+
+    const oldSection = String(train.currentSection || "").trim();
+    if (oldSection === sectionToken) {
+      renderAll();
+      return true;
+    }
+
+    train.lastSection = oldSection || null;
+    train.currentSection = sectionToken;
+    const pathIndex = Array.isArray(train.sectionPath) ? train.sectionPath.indexOf(sectionToken) : -1;
+    if (pathIndex >= 0) {
+      train.index = pathIndex;
+    } else if (Array.isArray(train.sectionPath) && train.sectionPath.length) {
+      train.index = train.sectionPath.length - 1;
+    } else {
+      train.index = 0;
+    }
+    updateSectionOccupancyForMove(oldSection, sectionToken, trainId);
     renderAll();
     return true;
   }
@@ -1434,7 +1577,6 @@
   }
 
   function updateSectionOccupancyForMove(oldSection, newSection, movingTrainId) {
-    const updates = [];
     const oldToken = String(oldSection || "").trim();
     const newToken = String(newSection || "").trim();
 
@@ -1442,7 +1584,10 @@
       const sectionState = state.sections.get(newToken) || { occupied: false, locked_by: null };
       sectionState.occupied = true;
       state.sections.set(newToken, sectionState);
-      updates.push({ id: newToken, occupied: true });
+      sendStateUpdate({
+        sections: [{ id: newToken, occupied: true }],
+        trains: localTrainsPayload(),
+      });
     }
 
     if (oldToken && oldToken !== newToken) {
@@ -1451,12 +1596,11 @@
         const sectionState = state.sections.get(oldToken) || { occupied: false, locked_by: null };
         sectionState.occupied = false;
         state.sections.set(oldToken, sectionState);
-        updates.push({ id: oldToken, occupied: false });
+        sendStateUpdate({
+          sections: [{ id: oldToken, occupied: false }],
+          trains: localTrainsPayload(),
+        });
       }
-    }
-
-    if (updates.length) {
-      sendStateUpdate({ sections: updates, trains: localTrainsPayload() });
     }
   }
 
@@ -1496,8 +1640,7 @@
       renderAll();
       return;
     }
-    commitTrainMove(drag.trainId, nearest.sectionId, false);
-    renderAll();
+    moveTrainToAnySection(drag.trainId, nearest.sectionId);
   }
 
   function findNearestSection(x, y, maxDistance) {
@@ -1623,8 +1766,13 @@
       const group = createSvg("g");
       const baseX = anchor.x - TRAIN_WIDTH / 2;
       const baseY = anchor.y - TRAIN_HEIGHT / 2 - 3;
-      const previousSection =
-        train.index > 0 ? String(train.sectionPath[train.index - 1] || "").trim() : "";
+      const previousSection = String(
+        train.lastSection ||
+          (train.index > 0 && Array.isArray(train.sectionPath)
+            ? train.sectionPath[train.index - 1]
+            : "") ||
+          ""
+      ).trim();
       const previousAnchor = previousSection ? state.anchors.get(previousSection) : null;
       const facingLeft = Boolean(previousAnchor && anchor.x < previousAnchor.x);
       if (facingLeft) {
