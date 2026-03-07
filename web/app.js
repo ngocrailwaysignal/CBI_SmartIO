@@ -1518,6 +1518,7 @@
       index: -1,
       direction: 1,
       lastSection: null,
+      pendingReleaseSection: null,
       currentSection: "",
       freePosition: nextStagingPosition(state.localTrains.size - 1),
     });
@@ -1571,6 +1572,9 @@
     for (const train of state.localTrains.values()) {
       if (train.currentSection) {
         sectionsToFree.add(train.currentSection);
+      }
+      if (train.pendingReleaseSection) {
+        sectionsToFree.add(train.pendingReleaseSection);
       }
     }
     state.localTrains.clear();
@@ -1659,7 +1663,7 @@
     train.direction = step.nextDirection;
     train.lastSection = oldSection || null;
     train.currentSection = targetSection;
-    updateSectionOccupancyForMove(oldSection, targetSection, trainId);
+    updateSectionOccupancyForMove(oldSection, targetSection, trainId, false);
     renderAll();
     return true;
   }
@@ -1704,7 +1708,7 @@
     } else if (directionalDelta < 0) {
       train.direction = -1;
     }
-    updateSectionOccupancyForMove(oldSection, sectionToken, trainId);
+    updateSectionOccupancyForMove(oldSection, sectionToken, trainId, true);
     renderAll();
     return true;
   }
@@ -1770,7 +1774,10 @@
       return false;
     }
     const movingTrain = state.localTrains.get(movingTrainId);
-    return Boolean(movingTrain && movingTrain.currentSection === token);
+    return Boolean(
+      movingTrain &&
+        (movingTrain.currentSection === token || movingTrain.pendingReleaseSection === token)
+    );
   }
 
   function localTrainCount(sectionId, excludingTrainId) {
@@ -1786,10 +1793,11 @@
     return count;
   }
 
-  function updateSectionOccupancyForMove(oldSection, newSection, movingTrainId) {
+  function updateSectionOccupancyForMove(oldSection, newSection, movingTrainId, lagRelease) {
     const oldToken = String(oldSection || "").trim();
     const newToken = String(newSection || "").trim();
     const updates = [];
+    const movingTrain = state.localTrains.get(movingTrainId) || null;
 
     if (newToken) {
       const sectionState = state.sections.get(newToken) || { occupied: false, locked_by: null };
@@ -1798,7 +1806,21 @@
       updates.push({ id: newToken, occupied: true });
     }
 
-    if (oldToken && oldToken !== newToken) {
+    if (lagRelease) {
+      const delayedSection = String(movingTrain?.pendingReleaseSection || "").trim();
+      if (delayedSection && delayedSection !== newToken) {
+        const remaining = localTrainCount(delayedSection, movingTrainId);
+        if (remaining === 0) {
+          const sectionState = state.sections.get(delayedSection) || { occupied: false, locked_by: null };
+          sectionState.occupied = false;
+          state.sections.set(delayedSection, sectionState);
+          updates.push({ id: delayedSection, occupied: false });
+        }
+      }
+      if (movingTrain) {
+        movingTrain.pendingReleaseSection = oldToken && oldToken !== newToken ? oldToken : null;
+      }
+    } else if (oldToken && oldToken !== newToken) {
       const remaining = localTrainCount(oldToken, movingTrainId);
       if (remaining === 0) {
         const sectionState = state.sections.get(oldToken) || { occupied: false, locked_by: null };
@@ -1806,6 +1828,11 @@
         state.sections.set(oldToken, sectionState);
         updates.push({ id: oldToken, occupied: false });
       }
+      if (movingTrain) {
+        movingTrain.pendingReleaseSection = null;
+      }
+    } else if (movingTrain) {
+      movingTrain.pendingReleaseSection = null;
     }
 
     if (updates.length) {
