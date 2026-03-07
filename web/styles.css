@@ -164,6 +164,10 @@ button:disabled {
   backdrop-filter: blur(8px);
 }
 
+.mobile-panel-toggle {
+  display: none;
+}
+
 .overlay-bottom {
   position: absolute;
   left: 12px;
@@ -420,5 +424,130 @@ button:disabled {
   .train-controls {
     width: calc(100% - 24px);
     top: 132px;
+  }
+}
+
+@media (max-width: 768px) {
+  body {
+    overflow: hidden;
+  }
+
+  .canvas-shell {
+    height: 100dvh;
+    padding: 4px;
+  }
+
+  .canvas-panel {
+    border-radius: 10px;
+  }
+
+  .brand h1 {
+    font-size: 17px;
+    letter-spacing: 0.35px;
+  }
+
+  .overlay-top {
+    top: 6px;
+    left: 6px;
+    right: 6px;
+    gap: 8px;
+    padding: 8px;
+  }
+
+  .conn-row {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    font-size: 12px;
+  }
+
+  .conn-row label {
+    grid-column: 1 / -1;
+  }
+
+  .conn-row input {
+    grid-column: 1 / -1;
+    width: 100%;
+    min-width: 0;
+    padding: 9px 10px;
+    font-size: 13px;
+  }
+
+  .conn-row button {
+    width: 100%;
+    min-height: 36px;
+  }
+
+  .badge,
+  .meta {
+    min-width: 0;
+    text-align: center;
+  }
+
+  .overlay-bottom {
+    left: 6px;
+    right: 6px;
+    bottom: 6px;
+    padding: 6px 8px;
+  }
+
+  #runtimeHud {
+    display: block;
+    font-size: 11px;
+    line-height: 1.25;
+  }
+
+  .mobile-panel-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 36px;
+    padding: 7px 12px;
+    font-size: 12px;
+  }
+
+  .train-controls {
+    left: 6px;
+    right: 6px;
+    top: auto;
+    width: auto;
+    bottom: 44px;
+    margin: 0;
+    max-height: min(56dvh, 430px);
+    overflow-y: auto;
+    transform: translateY(calc(100% + 16px));
+    opacity: 0;
+    pointer-events: none;
+    transition: transform 180ms ease, opacity 180ms ease;
+    z-index: 9;
+  }
+
+  body.mobile-controls-open .train-controls {
+    transform: translateY(0);
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .row {
+    margin: 6px 0;
+  }
+
+  .row button {
+    flex: 1;
+    min-height: 40px;
+    font-size: 13px;
+  }
+
+  .train-controls select {
+    min-height: 40px;
+    font-size: 13px;
+  }
+
+  .toast {
+    left: 8px;
+    right: 8px;
+    bottom: 12px;
+    max-width: none;
   }
 }

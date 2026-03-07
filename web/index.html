@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>CBI Runtime Web HMI</title>
-    <link rel="stylesheet" href="./styles.css?v=20260306-cbi-canvas-fix2" />
+    <link rel="stylesheet" href="./styles.css?v=20260306-mobile-ui-1" />
   </head>
   <body>
     <div class="canvas-shell">
@@ -21,11 +21,14 @@
             <span id="connBadge" class="badge offline">offline</span>
             <span id="connMeta" class="meta">-</span>
           </div>
+          <button id="mobilePanelToggle" class="mobile-panel-toggle" type="button" aria-controls="trainControls" aria-expanded="false">
+            Controls
+          </button>
         </div>
         <div class="overlay-bottom">
           <span id="runtimeHud" class="meta">CBI Clients: 0 | Web Clients: 0 | Routes: 0 | Trains: 0 | OCC: 0</span>
         </div>
-        <aside class="train-controls">
+        <aside id="trainControls" class="train-controls">
           <label class="field-label" for="routeSelect">Active Route</label>
           <select id="routeSelect"></select>
           <p id="activeRoute" class="hint">Selected Route: -</p>
@@ -41,6 +44,6 @@
         <div id="toast" class="toast hidden"></div>
       </section>
     </div>
-    <script src="./app.js?v=20260306-cbi-canvas-fix2"></script>
+    <script src="./app.js?v=20260306-mobile-ui-1"></script>
   </body>
 </html>
