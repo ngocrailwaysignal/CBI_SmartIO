@@ -1675,15 +1675,13 @@
   function updateSectionOccupancyForMove(oldSection, newSection, movingTrainId) {
     const oldToken = String(oldSection || "").trim();
     const newToken = String(newSection || "").trim();
+    const updates = [];
 
     if (newToken) {
       const sectionState = state.sections.get(newToken) || { occupied: false, locked_by: null };
       sectionState.occupied = true;
       state.sections.set(newToken, sectionState);
-      sendStateUpdate({
-        sections: [{ id: newToken, occupied: true }],
-        trains: localTrainsPayload(),
-      });
+      updates.push({ id: newToken, occupied: true });
     }
 
     if (oldToken && oldToken !== newToken) {
@@ -1692,11 +1690,15 @@
         const sectionState = state.sections.get(oldToken) || { occupied: false, locked_by: null };
         sectionState.occupied = false;
         state.sections.set(oldToken, sectionState);
-        sendStateUpdate({
-          sections: [{ id: oldToken, occupied: false }],
-          trains: localTrainsPayload(),
-        });
+        updates.push({ id: oldToken, occupied: false });
       }
+    }
+
+    if (updates.length) {
+      sendStateUpdate({
+        sections: updates,
+        trains: localTrainsPayload(),
+      });
     }
   }
 
