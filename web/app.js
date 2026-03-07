@@ -1402,6 +1402,7 @@
       // Auto-run should stop at route body and not enter overlap.
       sectionPath: [...autoPath],
       index: -1,
+      direction: 1,
       lastSection: null,
       currentSection: "",
       freePosition: nextStagingPosition(state.localTrains.size - 1),
@@ -1503,21 +1504,21 @@
       if (!String(train.currentSection || "").trim()) {
         continue;
       }
-      let nextSection = train.sectionPath[train.index + 1] || "";
-      if (!nextSection) {
+      const step = resolveNextAutoStep(train);
+      if (!step.targetSection) {
         const continued = tryAttachContinuationRoute(trainId);
         if (!continued) {
           continue;
         }
-        nextSection = train.sectionPath[train.index + 1] || "";
       }
-      if (!nextSection) {
+      const nextStep = resolveNextAutoStep(train);
+      if (!nextStep.targetSection) {
         continue;
       }
-      if (!canOccupySection(nextSection, trainId)) {
+      if (!canOccupySection(nextStep.targetSection, trainId)) {
         continue;
       }
-      commitTrainMove(trainId, nextSection, true);
+      commitTrainMove(trainId, nextStep.targetSection, true);
     }
   }
 
@@ -1526,10 +1527,10 @@
     if (!train) {
       return false;
     }
-    const expectedNext = train.sectionPath[train.index + 1] || "";
-    if (targetSection !== expectedNext) {
+    const step = resolveTrainStepToTarget(train, targetSection);
+    if (!step.valid) {
       if (!silent) {
-        showToast(`Invalid move for ${trainId}. Expected ${expectedNext || "END"} .`);
+        showToast(`Invalid move for ${trainId}. Target must be adjacent section.`);
       }
       return false;
     }
@@ -1540,7 +1541,8 @@
       return false;
     }
     const oldSection = train.currentSection;
-    train.index += 1;
+    train.index = step.nextIndex;
+    train.direction = step.nextDirection;
     train.lastSection = oldSection || null;
     train.currentSection = targetSection;
     updateSectionOccupancyForMove(oldSection, targetSection, trainId);
@@ -1574,6 +1576,7 @@
     train.lastSection = oldSection || null;
     train.currentSection = sectionToken;
     const pathIndex = Array.isArray(train.sectionPath) ? train.sectionPath.indexOf(sectionToken) : -1;
+    const previousIndex = Number.isFinite(train.index) ? train.index : -1;
     if (pathIndex >= 0) {
       train.index = pathIndex;
     } else if (Array.isArray(train.sectionPath) && train.sectionPath.length) {
@@ -1581,9 +1584,56 @@
     } else {
       train.index = 0;
     }
+    const directionalDelta = train.index - previousIndex;
+    if (directionalDelta > 0) {
+      train.direction = 1;
+    } else if (directionalDelta < 0) {
+      train.direction = -1;
+    }
     updateSectionOccupancyForMove(oldSection, sectionToken, trainId);
     renderAll();
     return true;
+  }
+
+  function resolveNextAutoStep(train) {
+    const path = Array.isArray(train?.sectionPath) ? train.sectionPath : [];
+    if (!path.length) {
+      return { targetSection: "", nextIndex: -1, direction: 1 };
+    }
+    const currentIndex = Number.isFinite(train?.index) ? train.index : -1;
+    let direction = Number(train?.direction) === -1 ? -1 : 1;
+
+    let nextIndex = currentIndex + direction;
+    if (nextIndex < 0 || nextIndex >= path.length) {
+      direction = direction * -1;
+      nextIndex = currentIndex + direction;
+    }
+    if (nextIndex < 0 || nextIndex >= path.length) {
+      return { targetSection: "", nextIndex: -1, direction };
+    }
+    const targetSection = String(path[nextIndex] || "").trim();
+    if (!targetSection) {
+      return { targetSection: "", nextIndex: -1, direction };
+    }
+    return { targetSection, nextIndex, direction };
+  }
+
+  function resolveTrainStepToTarget(train, targetSection) {
+    const path = Array.isArray(train?.sectionPath) ? train.sectionPath : [];
+    const targetToken = String(targetSection || "").trim();
+    if (!path.length || !targetToken) {
+      return { valid: false, nextIndex: -1, nextDirection: 1 };
+    }
+    const currentIndex = Number.isFinite(train?.index) ? train.index : -1;
+    const forwardIndex = currentIndex + 1;
+    if (forwardIndex >= 0 && forwardIndex < path.length && String(path[forwardIndex] || "").trim() === targetToken) {
+      return { valid: true, nextIndex: forwardIndex, nextDirection: 1 };
+    }
+    const backwardIndex = currentIndex - 1;
+    if (backwardIndex >= 0 && backwardIndex < path.length && String(path[backwardIndex] || "").trim() === targetToken) {
+      return { valid: true, nextIndex: backwardIndex, nextDirection: -1 };
+    }
+    return { valid: false, nextIndex: -1, nextDirection: 1 };
   }
 
   function canOccupySection(sectionId, movingTrainId) {
@@ -1700,6 +1750,7 @@
     train.routeId = bestCandidate.routeId;
     train.sectionPath = bestCandidate.sectionPath;
     train.index = bestCandidate.index;
+    train.direction = 1;
     return true;
   }
 
