@@ -1388,15 +1388,10 @@
       return;
     }
     const route = state.activeRoutes.get(routeId);
-    const mainPath = Array.isArray(route.main_section_path) ? route.main_section_path : [];
-    const autoPath = mainPath.length ? mainPath : route.section_path;
+    const startSection = resolveRouteStartSection(route);
+    const autoPath = buildAutoPath(route, startSection);
     if (!autoPath.length) {
       showToast(`Route ${routeId} has no section path for movement.`);
-      return;
-    }
-    const startSection = autoPath[0];
-    if (!canOccupySection(startSection, null)) {
-      showToast(`Cannot spawn train. Section ${startSection} is occupied.`);
       return;
     }
 
@@ -1406,12 +1401,51 @@
       routeId: routeId,
       // Auto-run should stop at route body and not enter overlap.
       sectionPath: [...autoPath],
-      index: 0,
+      index: -1,
       lastSection: null,
-      currentSection: startSection,
+      currentSection: "",
+      freePosition: nextStagingPosition(state.localTrains.size - 1),
     });
-    updateSectionOccupancyForMove(null, startSection, trainId);
     renderAll();
+  }
+
+  function buildAutoPath(route, startSectionHint) {
+    if (!route || typeof route !== "object") {
+      return [];
+    }
+    const mainPath = Array.isArray(route.main_section_path) ? route.main_section_path : [];
+    const autoPathBase = mainPath.length ? mainPath : route.section_path;
+    const autoPath = Array.isArray(autoPathBase) ? [...autoPathBase] : [];
+    const startSection = String(startSectionHint || "").trim();
+    if (startSection && !autoPath.includes(startSection)) {
+      autoPath.unshift(startSection);
+    }
+    return autoPath;
+  }
+
+  function resolveRouteStartSection(route) {
+    if (!route || typeof route !== "object") {
+      return "";
+    }
+    const entrySignal = String(route.entry_signal_id || "").trim();
+    const fullPath = Array.isArray(route.full_path) ? route.full_path : [];
+    if (entrySignal && fullPath.length) {
+      const entryIndex = fullPath.indexOf(entrySignal);
+      if (entryIndex > 0) {
+        for (let cursor = entryIndex - 1; cursor >= 0; cursor -= 1) {
+          const nodeId = String(fullPath[cursor] || "").trim();
+          if (nodeId && state.layoutSectionIds.has(nodeId)) {
+            return nodeId;
+          }
+        }
+      }
+    }
+    const mainPath = Array.isArray(route.main_section_path) ? route.main_section_path : [];
+    if (mainPath.length) {
+      return String(mainPath[0] || "").trim();
+    }
+    const sectionPath = Array.isArray(route.section_path) ? route.section_path : [];
+    return sectionPath.length ? String(sectionPath[0] || "").trim() : "";
   }
 
   function onClearTrains() {
@@ -1447,6 +1481,7 @@
     state.autoTimer = window.setInterval(() => {
       runAutoStep();
     }, 900);
+    renderRuntimeDigest();
   }
 
   function onAutoStop() {
@@ -1455,6 +1490,7 @@
     }
     window.clearInterval(state.autoTimer);
     state.autoTimer = null;
+    renderRuntimeDigest();
   }
 
   function runAutoStep() {
@@ -1464,7 +1500,17 @@
       if (!train) {
         continue;
       }
-      const nextSection = train.sectionPath[train.index + 1] || "";
+      if (!String(train.currentSection || "").trim()) {
+        continue;
+      }
+      let nextSection = train.sectionPath[train.index + 1] || "";
+      if (!nextSection) {
+        const continued = tryAttachContinuationRoute(trainId);
+        if (!continued) {
+          continue;
+        }
+        nextSection = train.sectionPath[train.index + 1] || "";
+      }
       if (!nextSection) {
         continue;
       }
@@ -1604,6 +1650,59 @@
     }
   }
 
+  function tryAttachContinuationRoute(trainId) {
+    const train = state.localTrains.get(trainId);
+    if (!train) {
+      return false;
+    }
+    const currentSection = String(train.currentSection || "").trim();
+    if (!currentSection) {
+      return false;
+    }
+
+    const routes = Array.from(state.activeRoutes.values()).sort((left, right) =>
+      String(left.route_id || "").localeCompare(String(right.route_id || ""))
+    );
+    let bestCandidate = null;
+
+    for (const route of routes) {
+      const startSection = resolveRouteStartSection(route);
+      const autoPath = buildAutoPath(route, startSection);
+      if (!autoPath.length) {
+        continue;
+      }
+      const index = autoPath.indexOf(currentSection);
+      if (index < 0 || index >= autoPath.length - 1) {
+        continue;
+      }
+      const nextSection = autoPath[index + 1];
+      if (!canOccupySection(nextSection, trainId)) {
+        continue;
+      }
+
+      const startsAtCurrent = startSection === currentSection;
+      const isSelectedRoute = String(route.route_id || "") === state.selectedRouteId;
+      const score = (startsAtCurrent ? 100 : 0) + (isSelectedRoute ? 10 : 0) - index;
+      if (!bestCandidate || score > bestCandidate.score) {
+        bestCandidate = {
+          score,
+          routeId: String(route.route_id || "").trim(),
+          sectionPath: autoPath,
+          index,
+        };
+      }
+    }
+
+    if (!bestCandidate) {
+      return false;
+    }
+
+    train.routeId = bestCandidate.routeId;
+    train.sectionPath = bestCandidate.sectionPath;
+    train.index = bestCandidate.index;
+    return true;
+  }
+
   function onPointerMove(event) {
     if (!state.drag) {
       return;
@@ -1637,10 +1736,22 @@
     const scenePoint = clientToSvgPoint(event.clientX, event.clientY);
     const nearest = findNearestSection(scenePoint.x, scenePoint.y, 36);
     if (!nearest) {
+      const train = state.localTrains.get(drag.trainId);
+      if (train && !String(train.currentSection || "").trim()) {
+        train.freePosition = { x: scenePoint.x, y: scenePoint.y };
+      }
       renderAll();
       return;
     }
     moveTrainToAnySection(drag.trainId, nearest.sectionId);
+  }
+
+  function nextStagingPosition(stagingIndex) {
+    const index = Math.max(0, Number(stagingIndex) || 0);
+    return {
+      x: CBI_VIEWBOX.x + 64 + (index % 5) * 72,
+      y: CBI_VIEWBOX.y + 60 + Math.floor(index / 5) * 58,
+    };
   }
 
   function findNearestSection(x, y, maxDistance) {
@@ -1760,12 +1871,12 @@
 
     for (const [trainId, train] of state.localTrains.entries()) {
       const anchor = state.anchors.get(train.currentSection);
-      if (!anchor) {
-        continue;
-      }
       const group = createSvg("g");
-      const baseX = anchor.x - TRAIN_WIDTH / 2;
-      const baseY = anchor.y - TRAIN_HEIGHT / 2 - 3;
+      const freePosition = train.freePosition || nextStagingPosition(0);
+      const drawX = anchor ? anchor.x : freePosition.x;
+      const drawY = anchor ? anchor.y : freePosition.y;
+      const baseX = drawX - TRAIN_WIDTH / 2;
+      const baseY = drawY - TRAIN_HEIGHT / 2 - 3;
       const previousSection = String(
         train.lastSection ||
           (train.index > 0 && Array.isArray(train.sectionPath)
@@ -1774,7 +1885,7 @@
           ""
       ).trim();
       const previousAnchor = previousSection ? state.anchors.get(previousSection) : null;
-      const facingLeft = Boolean(previousAnchor && anchor.x < previousAnchor.x);
+      const facingLeft = Boolean(anchor && previousAnchor && anchor.x < previousAnchor.x);
       if (facingLeft) {
         group.setAttribute(
           "transform",
