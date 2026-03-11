@@ -17,8 +17,8 @@
   const CAMERA_PAN_STEP = 0.2;
   const CAMERA_MIN_SCALE = 0.35;
   const CAMERA_MAX_SCALE = 1;
-  const STATE_UPDATE_ACK_BACKOFF_MS = [400, 800, 1600];
-  const STATE_UPDATE_ACK_MAX_RETRIES = 3;
+  const STATE_UPDATE_ACK_BACKOFF_MS = [1500, 3000, 6000, 10000];
+  const STATE_UPDATE_ACK_MAX_RETRIES = 4;
 
   const refs = {
     wsUrl: document.getElementById("wsUrl"),
@@ -71,6 +71,13 @@
     connectedStats: {
       web_clients: 0,
       cbi_clients: 0,
+    },
+    runtimeMeta: {
+      streamSeq: 0,
+      topologyRevision: "",
+      lastCommandId: "",
+      lastCommandStatus: "",
+      lastRuntimeEventSeq: 0,
     },
 
     tick: 0,
@@ -431,36 +438,40 @@
     state.pendingStateUpdateAcks.clear();
   }
 
-  function onAckMessage(payload) {
+  function onCommandResult(payload) {
     if (!payload || typeof payload !== "object") {
       return;
     }
-    if (String(payload.for_type || "").trim() !== "state_update") {
+    const commandId = String(payload.command_id || payload.msg_id || "").trim();
+    if (!commandId) {
       return;
     }
     const status = String(payload.status || "").trim().toLowerCase();
     if (!status) {
       return;
     }
-    const msgId = String(payload.msg_id || "").trim();
-    if (!msgId) {
-      return;
-    }
-    const pending = state.pendingStateUpdateAcks.get(msgId);
+    state.runtimeMeta.lastCommandId = commandId;
+    state.runtimeMeta.lastCommandStatus = status;
+    const pending = state.pendingStateUpdateAcks.get(commandId);
     if (!pending) {
+      renderRuntimeDigest();
       return;
     }
     if (status === "received") {
+      pending.retryCount = 0;
+      scheduleStateUpdateAckTimeout(commandId);
+      renderRuntimeDigest();
       return;
     }
     if (pending.timer !== null) {
       window.clearTimeout(pending.timer);
     }
-    state.pendingStateUpdateAcks.delete(msgId);
+    state.pendingStateUpdateAcks.delete(commandId);
     if (status !== "applied") {
       const message = String(payload.message || "").trim();
-      showToast(message ? `state_update failed: ${message}` : `state_update failed (${msgId}).`);
+      showToast(message ? `command failed: ${message}` : `command failed (${commandId}).`);
     }
+    renderRuntimeDigest();
   }
 
   function localTrainsPayload() {
@@ -501,8 +512,20 @@
       renderAll();
       return;
     }
+    if (type === "runtime_event") {
+      const streamSeq = Number(payload.stream_seq || 0);
+      if (Number.isFinite(streamSeq)) {
+        state.runtimeMeta.lastRuntimeEventSeq = Math.max(state.runtimeMeta.lastRuntimeEventSeq, streamSeq);
+      }
+      renderRuntimeDigest();
+      return;
+    }
+    if (type === "command_result") {
+      onCommandResult(payload);
+      return;
+    }
     if (type === "ack") {
-      onAckMessage(payload);
+      onCommandResult(payload);
       return;
     }
     if (type === "error") {
@@ -531,6 +554,10 @@
   }
 
   function applyRuntimePayload(runtime) {
+    if (Number.isFinite(Number(runtime.stream_seq))) {
+      state.runtimeMeta.streamSeq = Math.max(0, Number(runtime.stream_seq));
+    }
+    state.runtimeMeta.topologyRevision = String(runtime.topology_revision || "").trim();
     if (Number.isFinite(Number(runtime.tick))) {
       state.tick = Math.max(0, Number(runtime.tick));
     }
@@ -686,6 +713,10 @@
         });
       }
     }
+    if (Number.isFinite(Number(snapshot.stream_seq))) {
+      state.runtimeMeta.streamSeq = Math.max(0, Number(snapshot.stream_seq));
+    }
+    state.runtimeMeta.topologyRevision = String(snapshot.topology_revision || "").trim();
     ensureSelectedRoute();
   }
 
@@ -2227,11 +2258,14 @@
       Boolean(sectionState.occupied)
     ).length;
     const autoMode = state.autoTimer !== null ? "ON" : "OFF";
+    const pendingCommands = state.pendingStateUpdateAcks.size;
     if (refs.runtimeHud) {
       refs.runtimeHud.textContent =
         `CBI Clients: ${state.connectedStats.cbi_clients} | Web Clients: ${state.connectedStats.web_clients} | ` +
         `Routes: ${activeRoutes.length} | Local Trains: ${localTrains.length} | ` +
-        `CBI Trains: ${cbiTrains.length} | OCC: ${occupiedCount} | Auto: ${autoMode}`;
+        `CBI Trains: ${cbiTrains.length} | OCC: ${occupiedCount} | Auto: ${autoMode} | ` +
+        `Seq: ${state.runtimeMeta.streamSeq} | EventSeq: ${state.runtimeMeta.lastRuntimeEventSeq} | ` +
+        `PendingCmd: ${pendingCommands} | LastCmd: ${state.runtimeMeta.lastCommandStatus || "-"}`;
     }
   }
 

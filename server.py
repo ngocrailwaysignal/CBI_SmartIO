@@ -16,6 +16,7 @@ import os
 import time
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from aiohttp import WSMsgType, web
 
@@ -62,6 +63,9 @@ class SmartIOWebSimulator:
         self._cbi_clients: set[web.WebSocketResponse] = set()
         self._pending_state_update_acks: dict[str, web.WebSocketResponse] = {}
         self._web_socket_train_ids: dict[web.WebSocketResponse, set[str]] = {}
+        self._socket_source_ids: dict[web.WebSocketResponse, str] = {}
+        self._transport_commands_path = self.layout_path.parent / "transport_commands.jsonl"
+        self._recent_command_ids: dict[str, set[str]] = {}
 
     async def handle_ws(self, request: web.Request) -> web.WebSocketResponse:
         socket = web.WebSocketResponse(heartbeat=30)
@@ -85,14 +89,22 @@ class SmartIOWebSimulator:
         self._web_clients.discard(socket)
         self._cbi_clients.discard(socket)
         removed_train_ids = sorted(self._web_socket_train_ids.pop(socket, set()))
+        self._socket_source_ids.pop(socket, None)
         for msg_id, pending_socket in list(self._pending_state_update_acks.items()):
             if pending_socket is socket:
                 self._pending_state_update_acks.pop(msg_id, None)
         if removed_train_ids and self._cbi_clients:
             await self._forward_to_cbi(
                 {
-                    "type": "state_update",
-                    "payload": {"removed_train_ids": removed_train_ids},
+                    "type": "command",
+                    "payload": self._build_command_payload(
+                        socket,
+                        {
+                            "removed_train_ids": removed_train_ids,
+                        },
+                        message_type="state_update",
+                        command_id=f"disconnect-{uuid4().hex[:10]}",
+                    ),
                     "ts": _now_ts(),
                 }
             )
@@ -121,16 +133,84 @@ class SmartIOWebSimulator:
             await self._handle_cbi_ack(payload)
             return
 
-        if message_type == "command":
+        if message_type == "command_result":
+            self._cbi_clients.add(socket)
+            await self._handle_command_result(payload)
+            return
+
+        if message_type == "runtime_event":
             self._cbi_clients.add(socket)
             await self._broadcast_web(
                 {
-                    "type": "cbi_command",
+                    "type": "runtime_event",
                     "payload": payload,
                     "ts": envelope.get("ts", _now_ts()),
                 }
             )
-            await self._broadcast_snapshot()
+            return
+
+        if message_type == "command":
+            if socket in self._cbi_clients:
+                await self._broadcast_web(
+                    {
+                        "type": "cbi_command",
+                        "payload": payload,
+                        "ts": envelope.get("ts", _now_ts()),
+                    }
+                )
+                await self._broadcast_snapshot()
+                return
+            self._web_clients.add(socket)
+            command_id = str(payload.get("command_id", "")).strip()
+            if not self._cbi_clients:
+                if command_id:
+                    await self._send(
+                        socket,
+                        {
+                            "type": "command_result",
+                            "payload": {
+                                "command_id": command_id,
+                                "source_id": payload.get("source_id") or self._socket_source_ids.get(socket),
+                                "status": "rejected",
+                                "message": "No CBI client is connected",
+                                "stream_seq": 0,
+                            },
+                            "ts": _now_ts(),
+                        },
+                    )
+                else:
+                    await self._send_error(socket, "CBI_OFFLINE", "No CBI client is connected")
+                return
+            normalized_command = dict(payload)
+            normalized_command["source_id"] = (
+                str(payload.get("source_id", "")).strip()
+                or self._socket_source_ids.setdefault(socket, f"web-{uuid4().hex[:8]}")
+            )
+            if command_id:
+                self._pending_state_update_acks[command_id] = socket
+            self._persist_transport_command(normalized_command)
+            await self._forward_to_cbi(
+                {
+                    "type": "command",
+                    "payload": normalized_command,
+                    "ts": envelope.get("ts", _now_ts()),
+                }
+            )
+            if command_id:
+                await self._send(
+                    socket,
+                    {
+                        "type": "command_result",
+                        "payload": {
+                            "command_id": command_id,
+                            "source_id": normalized_command["source_id"],
+                            "status": "received",
+                            "message": "Forwarded to CBI",
+                            "stream_seq": 0,
+                        },
+                        "ts": _now_ts(),
+                    },
+                )
             return
 
         if message_type == "runtime_snapshot":
@@ -168,16 +248,47 @@ class SmartIOWebSimulator:
                 else:
                     await self._send_error(socket, "CBI_OFFLINE", "No CBI client is connected")
                 return
-            outbound_payload = self._normalize_state_update_payload(socket, payload, msg_id)
+            outbound_payload = self._build_command_payload(
+                socket,
+                self._normalize_state_update_payload(socket, payload, msg_id),
+                message_type="state_update",
+                command_id=msg_id,
+            )
+            if str(outbound_payload.get("kind", "")).strip() == "duplicate_command":
+                if msg_id:
+                    await self._send(
+                        socket,
+                        {
+                            "type": "command_result",
+                            "payload": {
+                                "command_id": msg_id,
+                                "source_id": outbound_payload.get("source_id"),
+                                "status": "stale",
+                                "message": "Duplicate command ignored at transport bridge",
+                                "stream_seq": 0,
+                            },
+                            "ts": _now_ts(),
+                        },
+                    )
+                return
             if msg_id:
                 self._pending_state_update_acks[msg_id] = socket
+            self._persist_transport_command(outbound_payload)
             await self._forward_to_cbi(
                 {
-                    "type": "state_update",
+                    "type": "command",
                     "payload": outbound_payload,
                     "ts": envelope.get("ts", _now_ts()),
                 }
             )
+            if msg_id:
+                await self._send_ack(
+                    socket,
+                    "state_update",
+                    msg_id,
+                    "received",
+                    "Forwarded to CBI",
+                )
             return
 
         if message_type == "web_control":
@@ -193,6 +304,7 @@ class SmartIOWebSimulator:
             self._web_clients.add(socket)
         elif role == "cbi":
             self._cbi_clients.add(socket)
+        self._socket_source_ids.setdefault(socket, f"{role or 'client'}-{uuid4().hex[:8]}")
         await self._send_snapshot(socket)
 
     async def _handle_cbi_ack(self, payload: dict[str, Any]) -> None:
@@ -215,6 +327,17 @@ class SmartIOWebSimulator:
                 "ts": _now_ts(),
             },
         )
+
+    async def _handle_command_result(self, payload: dict[str, Any]) -> None:
+        command_id = str(payload.get("command_id", "")).strip()
+        if not command_id:
+            return
+        socket = self._pending_state_update_acks.pop(command_id, None)
+        envelope = {"type": "command_result", "payload": payload, "ts": _now_ts()}
+        if socket is not None:
+            await self._send(socket, envelope)
+            return
+        await self._broadcast_web(envelope)
 
     async def _apply_web_control(self, socket: web.WebSocketResponse, payload: dict[str, Any]) -> None:
         action = str(payload.get("action", "")).strip()
@@ -303,6 +426,8 @@ class SmartIOWebSimulator:
             )
 
         return {
+            "stream_seq": int(snapshot.get("stream_seq", 0) or 0),
+            "topology_revision": snapshot.get("topology_revision"),
             "tick": int(snapshot.get("tick", 0) or 0),
             "sections": sections,
             "points": points,
@@ -315,6 +440,9 @@ class SmartIOWebSimulator:
     def _runtime_snapshot_payload(self) -> dict[str, Any]:
         snapshot = self.latest_runtime_snapshot if isinstance(self.latest_runtime_snapshot, dict) else {}
         return {
+            "snapshot_version": int(snapshot.get("snapshot_version", 2) or 2),
+            "stream_seq": int(snapshot.get("stream_seq", 0) or 0),
+            "topology_revision": snapshot.get("topology_revision"),
             "tick": int(snapshot.get("tick", 0) or 0),
             "routes": snapshot.get("routes", []) if isinstance(snapshot.get("routes"), list) else [],
             "trains": snapshot.get("trains", []) if isinstance(snapshot.get("trains"), list) else [],
@@ -404,6 +532,42 @@ class SmartIOWebSimulator:
 
     async def _send_snapshot(self, socket: web.WebSocketResponse) -> None:
         await self._send(socket, self._snapshot_envelope())
+
+    def _persist_transport_command(self, payload: dict[str, Any]) -> None:
+        self._transport_commands_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._transport_commands_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False))
+            handle.write("\n")
+
+    def _build_command_payload(
+        self,
+        socket: web.WebSocketResponse,
+        payload: dict[str, Any],
+        *,
+        message_type: str,
+        command_id: str,
+    ) -> dict[str, Any]:
+        source_id = self._socket_source_ids.setdefault(socket, f"web-{uuid4().hex[:8]}")
+        actual_command_id = str(command_id).strip() or f"cmd-{uuid4().hex[:10]}"
+        recent = self._recent_command_ids.setdefault(source_id, set())
+        if actual_command_id in recent:
+            return {
+                "command_id": actual_command_id,
+                "source_id": source_id,
+                "kind": "duplicate_command",
+                "payload": {"original_type": message_type},
+                "ts": _now_ts(),
+            }
+        if len(recent) >= 256:
+            recent.clear()
+        recent.add(actual_command_id)
+        return {
+            "command_id": actual_command_id,
+            "source_id": source_id,
+            "kind": "apply_state_update" if message_type == "state_update" else message_type,
+            "payload": dict(payload),
+            "ts": _now_ts(),
+        }
 
     def _normalize_state_update_payload(
         self,
