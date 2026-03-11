@@ -52,6 +52,7 @@
     reconnectAttempts: 0,
     reconnectTimer: null,
     mobileControlsOpen: false,
+    webClientId: "",
 
     layout: null,
     layoutSectionIds: new Set(),
@@ -113,6 +114,7 @@
   }
 
   function boot() {
+    state.webClientId = createClientId();
     if (refs.buildTag) {
       refs.buildTag.textContent = `build: ${WEB_BUILD}`;
     }
@@ -356,6 +358,15 @@
     return `su-${now}-${serial}`;
   }
 
+  function createClientId() {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") {
+      return window.crypto.randomUUID().slice(0, 8);
+    }
+    const now = Date.now().toString(36);
+    const random = Math.floor(Math.random() * 1679616).toString(36).padStart(4, "0");
+    return `${now}${random}`.slice(-8);
+  }
+
   function trackPendingStateUpdateAck(msgId, payload) {
     if (!msgId) {
       return;
@@ -427,7 +438,8 @@
     if (String(payload.for_type || "").trim() !== "state_update") {
       return;
     }
-    if (String(payload.status || "").trim() !== "received") {
+    const status = String(payload.status || "").trim().toLowerCase();
+    if (!status) {
       return;
     }
     const msgId = String(payload.msg_id || "").trim();
@@ -438,10 +450,17 @@
     if (!pending) {
       return;
     }
+    if (status === "received") {
+      return;
+    }
     if (pending.timer !== null) {
       window.clearTimeout(pending.timer);
     }
     state.pendingStateUpdateAcks.delete(msgId);
+    if (status !== "applied") {
+      const message = String(payload.message || "").trim();
+      showToast(message ? `state_update failed: ${message}` : `state_update failed (${msgId}).`);
+    }
   }
 
   function localTrainsPayload() {
@@ -1509,7 +1528,7 @@
       return;
     }
 
-    const trainId = `W${state.localTrainSerial++}`;
+    const trainId = `W-${state.webClientId}-${state.localTrainSerial++}`;
     state.localTrains.set(trainId, {
       id: trainId,
       routeId: routeId,

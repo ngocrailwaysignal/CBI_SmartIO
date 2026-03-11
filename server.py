@@ -60,6 +60,8 @@ class SmartIOWebSimulator:
         self._clients: set[web.WebSocketResponse] = set()
         self._web_clients: set[web.WebSocketResponse] = set()
         self._cbi_clients: set[web.WebSocketResponse] = set()
+        self._pending_state_update_acks: dict[str, web.WebSocketResponse] = {}
+        self._web_socket_train_ids: dict[web.WebSocketResponse, set[str]] = {}
 
     async def handle_ws(self, request: web.Request) -> web.WebSocketResponse:
         socket = web.WebSocketResponse(heartbeat=30)
@@ -74,14 +76,26 @@ class SmartIOWebSimulator:
                     continue
                 await self._on_text_message(socket, msg.data)
         finally:
-            self._on_disconnected(socket)
+            await self._on_disconnected(socket)
 
         return socket
 
-    def _on_disconnected(self, socket: web.WebSocketResponse) -> None:
+    async def _on_disconnected(self, socket: web.WebSocketResponse) -> None:
         self._clients.discard(socket)
         self._web_clients.discard(socket)
         self._cbi_clients.discard(socket)
+        removed_train_ids = sorted(self._web_socket_train_ids.pop(socket, set()))
+        for msg_id, pending_socket in list(self._pending_state_update_acks.items()):
+            if pending_socket is socket:
+                self._pending_state_update_acks.pop(msg_id, None)
+        if removed_train_ids and self._cbi_clients:
+            await self._forward_to_cbi(
+                {
+                    "type": "state_update",
+                    "payload": {"removed_train_ids": removed_train_ids},
+                    "ts": _now_ts(),
+                }
+            )
 
     async def _on_text_message(self, socket: web.WebSocketResponse, raw_message: str) -> None:
         try:
@@ -100,6 +114,11 @@ class SmartIOWebSimulator:
 
         if message_type == "hello":
             await self._handle_hello(socket, payload)
+            return
+
+        if message_type == "ack":
+            self._cbi_clients.add(socket)
+            await self._handle_cbi_ack(payload)
             return
 
         if message_type == "command":
@@ -137,12 +156,25 @@ class SmartIOWebSimulator:
         if message_type == "state_update":
             self._web_clients.add(socket)
             msg_id = str(envelope.get("msg_id", "")).strip()
+            if not self._cbi_clients:
+                if msg_id:
+                    await self._send_ack(
+                        socket,
+                        "state_update",
+                        msg_id,
+                        "failed",
+                        "No CBI client is connected",
+                    )
+                else:
+                    await self._send_error(socket, "CBI_OFFLINE", "No CBI client is connected")
+                return
+            outbound_payload = self._normalize_state_update_payload(socket, payload, msg_id)
             if msg_id:
-                await self._send_ack(socket, "state_update", msg_id, "received")
+                self._pending_state_update_acks[msg_id] = socket
             await self._forward_to_cbi(
                 {
                     "type": "state_update",
-                    "payload": payload,
+                    "payload": outbound_payload,
                     "ts": envelope.get("ts", _now_ts()),
                 }
             )
@@ -162,6 +194,27 @@ class SmartIOWebSimulator:
         elif role == "cbi":
             self._cbi_clients.add(socket)
         await self._send_snapshot(socket)
+
+    async def _handle_cbi_ack(self, payload: dict[str, Any]) -> None:
+        msg_id = str(payload.get("msg_id", "")).strip()
+        if not msg_id:
+            return
+        socket = self._pending_state_update_acks.pop(msg_id, None)
+        if socket is None:
+            return
+        await self._send(
+            socket,
+            {
+                "type": "ack",
+                "payload": {
+                    "for_type": str(payload.get("for_type", "")).strip() or "state_update",
+                    "msg_id": msg_id,
+                    "status": str(payload.get("status", "")).strip() or "applied",
+                    "message": str(payload.get("message", "")).strip(),
+                },
+                "ts": _now_ts(),
+            },
+        )
 
     async def _apply_web_control(self, socket: web.WebSocketResponse, payload: dict[str, Any]) -> None:
         action = str(payload.get("action", "")).strip()
@@ -316,6 +369,7 @@ class SmartIOWebSimulator:
         for_type: str,
         msg_id: str,
         status: str = "received",
+        message: str = "",
     ) -> None:
         envelope = {
             "type": "ack",
@@ -323,6 +377,7 @@ class SmartIOWebSimulator:
                 "for_type": str(for_type).strip(),
                 "msg_id": str(msg_id).strip(),
                 "status": str(status).strip(),
+                "message": str(message).strip(),
             },
             "ts": _now_ts(),
         }
@@ -349,6 +404,33 @@ class SmartIOWebSimulator:
 
     async def _send_snapshot(self, socket: web.WebSocketResponse) -> None:
         await self._send(socket, self._snapshot_envelope())
+
+    def _normalize_state_update_payload(
+        self,
+        socket: web.WebSocketResponse,
+        payload: dict[str, Any],
+        msg_id: str,
+    ) -> dict[str, Any]:
+        normalized_payload = dict(payload)
+        train_ids_before = self._web_socket_train_ids.get(socket, set())
+        train_ids_after = set(train_ids_before)
+        trains_payload = payload.get("trains")
+        if isinstance(trains_payload, list):
+            train_ids_after = {
+                str(train_item.get("id", "")).strip()
+                for train_item in trains_payload
+                if isinstance(train_item, dict) and str(train_item.get("id", "")).strip()
+            }
+            self._web_socket_train_ids[socket] = train_ids_after
+        removed_train_ids = list(normalized_payload.get("removed_train_ids", []))
+        removed_train_ids.extend(sorted(train_ids_before - train_ids_after))
+        if removed_train_ids:
+            normalized_payload["removed_train_ids"] = sorted(
+                {str(train_id).strip() for train_id in removed_train_ids if str(train_id).strip()}
+            )
+        if msg_id:
+            normalized_payload["msg_id"] = msg_id
+        return normalized_payload
 
     def _snapshot_envelope(self) -> dict[str, Any]:
         runtime_payload = self._runtime_payload()
