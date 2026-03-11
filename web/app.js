@@ -1773,10 +1773,6 @@
 
     let nextIndex = currentIndex + direction;
     if (nextIndex < 0 || nextIndex >= path.length) {
-      direction = direction * -1;
-      nextIndex = currentIndex + direction;
-    }
-    if (nextIndex < 0 || nextIndex >= path.length) {
       return { targetSection: "", nextIndex: -1, direction };
     }
     const targetSection = String(path[nextIndex] || "").trim();
